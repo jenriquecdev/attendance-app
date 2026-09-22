@@ -18,6 +18,9 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 EMPLEADOS_FILE = os.path.join(BASE_DIR, "empleados.csv")
 ASISTENCIAS_FILE = os.path.join(BASE_DIR, "asistencias.csv")
 
+# Nombre de la plantilla de asistencia
+TEMPLATE_NAME = "checkin.html"
+
 # Token de seguridad configurado para el cartel QR
 VALID_TOKEN = "c4a8b7e2-89f1-4d33-bc12-9901ef234567"
 
@@ -81,7 +84,7 @@ def vista_marcar(request: Request, t: Optional[str] = Query(None)):
     empleados = obtener_empleados()
     return templates.TemplateResponse(
         request=request,
-        name="index.html",
+        name=TEMPLATE_NAME,
         context={
             "empleados": empleados,
             "token": t,
@@ -109,7 +112,7 @@ def procesar_marcado(
             empleados = obtener_empleados()
             return templates.TemplateResponse(
                 request=request,
-                name="index.html",
+                name=TEMPLATE_NAME,
                 context={
                     "empleados": empleados,
                     "token": token,
@@ -154,7 +157,7 @@ def procesar_marcado(
             empleados = obtener_empleados()
             return templates.TemplateResponse(
                 request=request,
-                name="index.html",
+                name=TEMPLATE_NAME,
                 context={
                     "empleados": empleados,
                     "token": token,
@@ -174,7 +177,7 @@ def procesar_marcado(
                     empleados = obtener_empleados()
                     return templates.TemplateResponse(
                         request=request,
-                        name="index.html",
+                        name=TEMPLATE_NAME,
                         context={
                             "empleados": empleados,
                             "token": token,
@@ -201,7 +204,7 @@ def procesar_marcado(
             empleados = obtener_empleados()
             return templates.TemplateResponse(
                 request=request,
-                name="index.html",
+                name=TEMPLATE_NAME,
                 context={
                     "empleados": empleados,
                     "token": token,
@@ -218,7 +221,7 @@ def procesar_marcado(
     empleados = obtener_empleados()
     return templates.TemplateResponse(
         request=request,
-        name="index.html",
+        name=TEMPLATE_NAME,
         context={
             "empleados": empleados,
             "token": token,
