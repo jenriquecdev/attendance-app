@@ -1,183 +1,284 @@
 import csv
 import os
 from datetime import datetime
-from threading import Lock
+from io import StringIO
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
 
-app = FastAPI(title="Sistema de Asistencia QR - CSV")
+app = FastAPI(title="Control de Asistencia QR")
 
-templates = Jinja2Templates(directory="templates")
+# Configuración de rutas y archivos
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+EMPLEADOS_FILE = os.path.join(BASE_DIR, "empleados.csv")
+ASISTENCIAS_FILE = os.path.join(BASE_DIR, "asistencias.csv")
 
-# Archivos de datos y token estático del cartel
-CSV_ASISTENCIAS = "asistencias.csv"
-CSV_EMPLEADOS = "empleados.csv"
-TOKEN_VALIDO = "c4a8b7e2-89f1-4d33-bc12-9901ef234567"
+# Token de seguridad configurado para el cartel QR
+VALID_TOKEN = "c4a8b7e2-89f1-4d33-bc12-9901ef234567"
 
-# Candado para evitar conflictos si dos personas marcan al mismo segundo
-archivo_lock = Lock()
 
-# --- MODELOS PYDANTIC ---
-class MarcajeCreate(BaseModel):
-    token: str
-    tipo_marca: str  # "ENTRADA" o "SALIDA"
-    nombre_completo: str
-    cedula: Optional[str] = ""
-    es_nuevo: bool = False
+def inicializar_archivos():
+    """Asegura que existan los archivos CSV con sus encabezados base."""
+    if not os.path.exists(EMPLEADOS_FILE):
+        with open(EMPLEADOS_FILE, mode="w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["id", "nombre", "cedula"])
 
-# --- RUTAS WEB ---
-@app.get("/marcar", response_class=HTMLResponse)
-def pagina_marcar(request: Request, t: str = ""):
-    return templates.TemplateResponse(
-        request=request,
-        name="checkin.html",
-        context={"token": t}
-    )
+    if not os.path.exists(ASISTENCIAS_FILE):
+        with open(ASISTENCIAS_FILE, mode="w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "Nombre", "Cedula", "Fecha", "Hora Entrada", "Hora Salida", "Horas Trabajadas"
+            ])
 
-@app.get("/api/scan/{token}")
-def obtener_empleados(token: str):
-    if token != TOKEN_VALIDO:
-        raise HTTPException(status_code=404, detail="Cartel QR no válido o vencido.")
 
+inicializar_archivos()
+
+
+def obtener_empleados():
+    """Lee la lista de empleados registrados."""
     empleados = []
-    if os.path.exists(CSV_EMPLEADOS):
-        with open(CSV_EMPLEADOS, mode="r", encoding="utf-8") as f:
+    if os.path.exists(EMPLEADOS_FILE):
+        with open(EMPLEADOS_FILE, mode="r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                empleados.append({
-                    "id": row["id"],
-                    "nombre": row["nombre"],
-                    "cedula": row.get("cedula", "")
-                })
+                if row.get("nombre"):
+                    empleados.append(row)
     return empleados
 
-@app.post("/api/asistencia")
-def registrar_asistencia(payload: MarcajeCreate):
-    if payload.token != TOKEN_VALIDO:
-        raise HTTPException(status_code=400, detail="Cartel QR no válido.")
 
-    nombre = payload.nombre_completo.strip()
-    if not nombre:
-        raise HTTPException(status_code=422, detail="El nombre es obligatorio.")
+def registrar_nuevo_empleado(nombre: str, cedula: str):
+    """Guarda un empleado nuevo en empleados.csv para futuras ocasiones."""
+    empleados = obtener_empleados()
+    nuevo_id = str(len(empleados) + 1)
+    with open(EMPLEADOS_FILE, mode="a", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([nuevo_id, nombre.strip(), cedula.strip()])
 
-    cedula = (payload.cedula or "").strip() or "S/N"
+
+# ==========================================
+# RUTAS DE LA APLICACIÓN
+# ==========================================
+
+@app.get("/", response_class=HTMLResponse)
+def root():
+    return RedirectResponse(url=f"/marcar?t={VALID_TOKEN}")
+
+
+@app.get("/marcar", response_class=HTMLResponse)
+def vista_marcar(request: Request, t: Optional[str] = Query(None)):
+    if t != VALID_TOKEN:
+        raise HTTPException(
+            status_code=403,
+            detail="Acceso no autorizado. Debe escanear el código QR oficial de la obra."
+        )
+
+    empleados = obtener_empleados()
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "empleados": empleados,
+            "token": t,
+            "mensaje": None,
+            "tipo_mensaje": None,
+        }
+    )
+
+
+@app.post("/marcar", response_class=HTMLResponse)
+def procesar_marcado(
+    request: Request,
+    token: str = Form(...),
+    tipo_accion: str = Form(...),  # 'entrada' o 'salida'
+    empleado_select: str = Form(...),
+    nombre_nuevo: Optional[str] = Form(None),
+    cedula_nueva: Optional[str] = Form(None),
+):
+    if token != VALID_TOKEN:
+        raise HTTPException(status_code=403, detail="Token no válido")
+
+    # Determinar identidad del trabajador
+    if empleado_select == "nuevo":
+        if not nombre_nuevo or not nombre_nuevo.strip():
+            empleados = obtener_empleados()
+            return templates.TemplateResponse(
+                "index.html",
+                {
+                    "request": request,
+                    "empleados": empleados,
+                    "token": token,
+                    "mensaje": "Debes ingresar tu nombre si seleccionas personal nuevo.",
+                    "tipo_mensaje": "error",
+                }
+            )
+        nombre = nombre_nuevo.strip().title()
+        cedula = (cedula_nueva or "").strip()
+        registrar_nuevo_empleado(nombre, cedula)
+    else:
+        partes = empleado_select.split("|")
+        nombre = partes[0]
+        cedula = partes[1] if len(partes) > 1 else ""
+
     ahora = datetime.now()
-    hoy_str = ahora.strftime("%Y-%m-%d")
-    hora_actual_str = ahora.strftime("%H:%M")
+    fecha_hoy = ahora.strftime("%Y-%m-%d")
+    hora_actual = ahora.strftime("%H:%M:%S")
 
-    with archivo_lock:
-        # 1. Si es nuevo personal, guardarlo en la lista para futuras ocasiones
-        if payload.es_nuevo:
-            empleados_existentes = []
-            if os.path.exists(CSV_EMPLEADOS):
-                with open(CSV_EMPLEADOS, mode="r", encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    empleados_existentes = list(reader)
+    # Leer registros existentes
+    registros = []
+    encontrado = False
+    mensaje_exito = ""
 
-            nombres_registrados = [e["nombre"].strip().lower() for e in empleados_existentes]
-            if nombre.lower() not in nombres_registrados:
-                nuevo_id = str(len(empleados_existentes) + 1)
-                with open(CSV_EMPLEADOS, mode="a", encoding="utf-8", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([nuevo_id, nombre, cedula])
+    if os.path.exists(ASISTENCIAS_FILE):
+        with open(ASISTENCIAS_FILE, mode="r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            registros = list(reader)
 
-        # 2. Leer registros de asistencia existentes
-        registros = []
-        if os.path.exists(CSV_ASISTENCIAS):
-            with open(CSV_ASISTENCIAS, mode="r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                registros = list(reader)
+    if not registros:
+        registros.append(["Nombre", "Cedula", "Fecha", "Hora Entrada", "Hora Salida", "Horas Trabajadas"])
 
-        # 3. Buscar si el empleado ya tiene un registro hoy
-        indice_hoy = None
-        for i, reg in enumerate(registros):
-            if reg["Nombre"].strip().lower() == nombre.lower() and reg["Fecha"] == hoy_str:
-                indice_hoy = i
+    # Lógica de Entrada / Salida
+    if tipo_accion == "entrada":
+        # Verificar si ya marcó entrada hoy
+        for fila in registros[1:]:
+            if len(fila) >= 3 and fila[0] == nombre and fila[2] == fecha_hoy:
+                encontrado = True
                 break
 
-        # 4. Procesar marcación
-        if payload.tipo_marca == "ENTRADA":
-            if indice_hoy is not None:
-                hora_reg = registros[indice_hoy]["Hora Entrada"]
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Ya tienes entrada registrada hoy a las {hora_reg}."
-                )
+        if encontrado:
+            empleados = obtener_empleados()
+            return templates.TemplateResponse(
+                "index.html",
+                {
+                    "request": request,
+                    "empleados": empleados,
+                    "token": token,
+                    "mensaje": f"Hola {nombre}, ya tienes una entrada registrada el día de hoy.",
+                    "tipo_mensaje": "advertencia",
+                }
+            )
 
-            nueva_fila = {
-                "Nombre": nombre,
-                "Cedula": cedula,
-                "Fecha": hoy_str,
-                "Hora Entrada": hora_actual_str,
-                "Hora Salida": "Pendiente",
-                "Horas Trabajadas": "0.00"
-            }
-            registros.append(nueva_fila)
-            mensaje_retorno = f"Entrada registrada a las {hora_actual_str}"
+        registros.append([nombre, cedula, fecha_hoy, hora_actual, "", ""])
+        mensaje_exito = f"¡Entrada registrada con éxito a las {hora_actual}!"
 
-        elif payload.tipo_marca == "SALIDA":
-            if indice_hoy is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No tienes registro de entrada el día de hoy."
-                )
+    elif tipo_accion == "salida":
+        # Buscar el registro de hoy para asentar salida y calcular horas
+        for fila in reversed(registros[1:]):
+            if len(fila) >= 3 and fila[0] == nombre and fila[2] == fecha_hoy:
+                if fila[4]:  # Ya tenía salida
+                    empleados = obtener_empleados()
+                    return templates.TemplateResponse(
+                        "index.html",
+                        {
+                            "request": request,
+                            "empleados": empleados,
+                            "token": token,
+                            "mensaje": f"{nombre}, ya habías registrado tu salida anteriormente.",
+                            "tipo_mensaje": "advertencia",
+                        }
+                    )
 
-            if registros[indice_hoy]["Hora Salida"] != "Pendiente":
-                hora_sal = registros[indice_hoy]["Hora Salida"]
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Ya registraste tu salida hoy a las {hora_sal}."
-                )
+                fila[4] = hora_actual
+                try:
+                    t_ent = datetime.strptime(fila[3], "%H:%M:%S")
+                    t_sal = datetime.strptime(hora_actual, "%H:%M:%S")
+                    dif_segundos = (t_sal - t_ent).total_seconds()
+                    horas = round(max(0, dif_segundos / 3600), 2)
+                    fila[5] = str(horas)
+                except Exception:
+                    fila[5] = "0.0"
 
-            # Calcular diferencia de horas
-            hora_ent_str = registros[indice_hoy]["Hora Entrada"]
-            t_entrada = datetime.strptime(f"{hoy_str} {hora_ent_str}", "%Y-%m-%d %H:%M")
-            t_salida = datetime.strptime(f"{hoy_str} {hora_actual_str}", "%Y-%m-%d %H:%M")
-            
-            diferencia_horas = round((t_salida - t_entrada).total_seconds() / 3600.0, 2)
-            if diferencia_horas < 0:
-                diferencia_horas = 0.00
+                encontrado = True
+                mensaje_exito = f"¡Salida registrada a las {hora_actual}! Total: {fila[5]} horas trabajadas."
+                break
 
-            registros[indice_hoy]["Hora Salida"] = hora_actual_str
-            registros[indice_hoy]["Horas Trabajadas"] = f"{diferencia_horas:.2f}"
-            mensaje_retorno = f"Salida registrada a las {hora_actual_str}. Total: {diferencia_horas:.2f} hrs."
+        if not encontrado:
+            empleados = obtener_empleados()
+            return templates.TemplateResponse(
+                "index.html",
+                {
+                    "request": request,
+                    "empleados": empleados,
+                    "token": token,
+                    "mensaje": f"No se encontró un registro de entrada previo para {nombre} el día de hoy.",
+                    "tipo_mensaje": "error",
+                }
+            )
 
-        else:
-            raise HTTPException(status_code=400, detail="Acción no válida.")
+    # Sobrescribir asistencias.csv con los datos actualizados
+    with open(ASISTENCIAS_FILE, mode="w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerows(registros)
 
-        # 5. Reescribir el archivo CSV con los datos actualizados
-        encabezados = ["Nombre", "Cedula", "Fecha", "Hora Entrada", "Hora Salida", "Horas Trabajadas"]
-        with open(CSV_ASISTENCIAS, mode="w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=encabezados)
-            writer.writeheader()
-            writer.writerows(registros)
+    empleados = obtener_empleados()
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "empleados": empleados,
+            "token": token,
+            "mensaje": mensaje_exito,
+            "tipo_mensaje": "exito",
+        }
+    )
 
-    return {
-        "estado": "exito",
-        "mensaje": mensaje_retorno,
-        "empleado": nombre
-    }
 
-# Endpoint directo para descargar el archivo desde el navegador o celular
+# ==========================================
+# ENDPOINT DE DESCARGA OPTIMIZADO PARA EXCEL
+# ==========================================
+
 @app.get("/descargar-reporte")
 def descargar_reporte():
-    if not os.path.exists(CSV_ASISTENCIAS):
-        raise HTTPException(status_code=404, detail="Aún no hay asistencias registradas.")
-    return FileResponse(
-        path=CSV_ASISTENCIAS,
-        filename="reporte_asistencias.csv",
-        media_type="text/csv"
+    """
+    Genera un archivo CSV con delimitador ';' y marca UTF-8 BOM (\ufeff)
+    para que Excel en español lo abra en columnas y con acentos correctos al hacer doble clic.
+    """
+    if not os.path.exists(ASISTENCIAS_FILE):
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontraron registros de asistencias para exportar."
+        )
+
+    output = StringIO()
+    output.write("\ufeff")  # BOM UTF-8 para Excel
+    writer = csv.writer(output, delimiter=";", quoting=csv.QUOTE_MINIMAL)
+
+    writer.writerow([
+        "Nombre y Apellido",
+        "Cédula",
+        "Fecha",
+        "Hora Entrada",
+        "Hora Salida",
+        "Horas Trabajadas"
+    ])
+
+    try:
+        with open(ASISTENCIAS_FILE, mode="r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            primera_fila = next(reader, None)
+
+            # Si la primera fila ya contiene los encabezados, no la duplicamos
+            if primera_fila and "nombre" not in primera_fila[0].lower():
+                writer.writerow(primera_fila)
+
+            for fila in reader:
+                if fila and any(campo.strip() for campo in fila):
+                    writer.writerow(fila)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al leer asistencias: {str(e)}")
+
+    contenido = output.getvalue()
+    output.close()
+
+    return Response(
+        content=contenido,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": "attachment; filename=reporte_asistencias.csv"
+        }
     )
