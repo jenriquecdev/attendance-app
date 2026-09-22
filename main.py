@@ -80,9 +80,9 @@ def vista_marcar(request: Request, t: Optional[str] = Query(None)):
 
     empleados = obtener_empleados()
     return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
+        request=request,
+        name="index.html",
+        context={
             "empleados": empleados,
             "token": t,
             "mensaje": None,
@@ -108,9 +108,9 @@ def procesar_marcado(
         if not nombre_nuevo or not nombre_nuevo.strip():
             empleados = obtener_empleados()
             return templates.TemplateResponse(
-                "index.html",
-                {
-                    "request": request,
+                request=request,
+                name="index.html",
+                context={
                     "empleados": empleados,
                     "token": token,
                     "mensaje": "Debes ingresar tu nombre si seleccionas personal nuevo.",
@@ -153,9 +153,9 @@ def procesar_marcado(
         if encontrado:
             empleados = obtener_empleados()
             return templates.TemplateResponse(
-                "index.html",
-                {
-                    "request": request,
+                request=request,
+                name="index.html",
+                context={
                     "empleados": empleados,
                     "token": token,
                     "mensaje": f"Hola {nombre}, ya tienes una entrada registrada el día de hoy.",
@@ -173,9 +173,9 @@ def procesar_marcado(
                 if fila[4]:  # Ya tenía salida
                     empleados = obtener_empleados()
                     return templates.TemplateResponse(
-                        "index.html",
-                        {
-                            "request": request,
+                        request=request,
+                        name="index.html",
+                        context={
                             "empleados": empleados,
                             "token": token,
                             "mensaje": f"{nombre}, ya habías registrado tu salida anteriormente.",
@@ -200,9 +200,9 @@ def procesar_marcado(
         if not encontrado:
             empleados = obtener_empleados()
             return templates.TemplateResponse(
-                "index.html",
-                {
-                    "request": request,
+                request=request,
+                name="index.html",
+                context={
                     "empleados": empleados,
                     "token": token,
                     "mensaje": f"No se encontró un registro de entrada previo para {nombre} el día de hoy.",
@@ -210,16 +210,16 @@ def procesar_marcado(
                 }
             )
 
-    # Sobrescribir asistencias.csv con los datos actualizados
+    # Guardar en asistencias.csv
     with open(ASISTENCIAS_FILE, mode="w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerows(registros)
 
     empleados = obtener_empleados()
     return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
+        request=request,
+        name="index.html",
+        context={
             "empleados": empleados,
             "token": token,
             "mensaje": mensaje_exito,
@@ -229,7 +229,7 @@ def procesar_marcado(
 
 
 # ==========================================
-# ENDPOINT DE DESCARGA OPTIMIZADO PARA EXCEL
+# DESCARGA DE REPORTE COMPATIBLE CON EXCEL
 # ==========================================
 
 @app.get("/descargar-reporte")
@@ -245,7 +245,7 @@ def descargar_reporte():
         )
 
     output = StringIO()
-    output.write("\ufeff")  # BOM UTF-8 para Excel
+    output.write("\ufeff")  # BOM UTF-8 para Excel en español
     writer = csv.writer(output, delimiter=";", quoting=csv.QUOTE_MINIMAL)
 
     writer.writerow([
@@ -262,7 +262,6 @@ def descargar_reporte():
             reader = csv.reader(f)
             primera_fila = next(reader, None)
 
-            # Si la primera fila ya contiene los encabezados, no la duplicamos
             if primera_fila and "nombre" not in primera_fila[0].lower():
                 writer.writerow(primera_fila)
 
