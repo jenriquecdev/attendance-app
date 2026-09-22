@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Control de Asistencia</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 min-h-screen flex items-center justify-center p-4">
+
+  <div class="bg-white w-full max-w-sm rounded-2xl shadow-xl p-6 border border-slate-200">
+    <div class="text-center mb-6">
+      <div class="inline-flex items-center justify-center w-12 h-12 bg-blue-100 text-blue-600 rounded-full mb-2">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+        </svg>
+      </div>
+      <h1 class="text-xl font-bold text-slate-800">Control de Asistencia</h1>
+      <p class="text-xs text-slate-500 mt-1">Registra tu jornada de hoy</p>
+    </div>
+
+    <div id="alert-box" class="hidden mb-4 p-3 rounded-lg text-sm font-medium text-center"></div>
+
+    <form id="attendance-form" class="space-y-4">
+      <div>
+        <label class="block text-xs font-semibold text-slate-600 mb-1 uppercase tracking-wider">Empleado</label>
+        <select id="employee-select" required onchange="handleSelectChange()" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-3 text-slate-700 text-sm focus:ring-2 focus:ring-blue-500 outline-none">
+          <option value="" disabled selected>Cargando lista...</option>
+        </select>
+      </div>
+
+      <!-- Campos dinámicos si es personal nuevo -->
+      <div id="new-employee-fields" class="hidden space-y-3 p-3 bg-blue-50 rounded-xl border border-blue-200">
+        <div>
+          <label class="block text-xs font-semibold text-blue-900 mb-1">Nombre y Apellido</label>
+          <input type="text" id="fullname-input" placeholder="Ej: Juan Pérez" class="w-full bg-white border border-blue-300 rounded-lg px-3 py-2 text-sm text-slate-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-blue-900 mb-1">Cédula</label>
+          <input type="text" id="doc-input" placeholder="Opcional" class="w-full bg-white border border-blue-300 rounded-lg px-3 py-2 text-sm text-slate-800 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3 pt-3">
+        <button type="button" onclick="submitAttendance('ENTRADA')" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 px-2 rounded-xl text-sm shadow transition duration-150 active:scale-95">
+          Marcar Entrada
+        </button>
+        <button type="button" onclick="submitAttendance('SALIDA')" class="w-full bg-slate-700 hover:bg-slate-800 text-white font-semibold py-3 px-2 rounded-xl text-sm shadow transition duration-150 active:scale-95">
+          Marcar Salida
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const token = urlParams.get('t');
+    const alertBox = document.getElementById('alert-box');
+    const select = document.getElementById('employee-select');
+    const newFields = document.getElementById('new-employee-fields');
+    const fullnameInput = document.getElementById('fullname-input');
+    const docInput = document.getElementById('doc-input');
+
+    let listaEmpleados = [];
+
+    if (!token) {
+      showAlert('No se detectó un código de cartel válido.', 'error');
+      document.getElementById('attendance-form').classList.add('hidden');
+    } else {
+      cargarEmpleados();
+    }
+
+    async function cargarEmpleados() {
+      try {
+        const res = await fetch(`/api/scan/${token}`);
+        if (!res.ok) throw new Error('Cartel QR no válido o vencido');
+        listaEmpleados = await res.json();
+        
+        select.innerHTML = '<option value="" disabled selected>Selecciona tu nombre</option>';
+        
+        const optNew = document.createElement('option');
+        optNew.value = "NEW";
+        optNew.textContent = "✨ + Soy nuevo / No estoy en lista";
+        select.appendChild(optNew);
+
+        listaEmpleados.forEach(emp => {
+          const opt = document.createElement('option');
+          opt.value = emp.nombre;
+          opt.dataset.cedula = emp.cedula || "";
+          opt.textContent = emp.nombre;
+          select.appendChild(opt);
+        });
+      } catch (err) {
+        showAlert(err.message, 'error');
+        document.getElementById('attendance-form').classList.add('hidden');
+      }
+    }
+
+    function handleSelectChange() {
+      if (select.value === "NEW") {
+        newFields.classList.remove('hidden');
+      } else {
+        newFields.classList.add('hidden');
+      }
+    }
+
+    async function submitAttendance(tipo) {
+      const isNew = select.value === "NEW";
+      let nombre = "";
+      let cedula = "";
+
+      if (!select.value) {
+        showAlert('Selecciona tu nombre o la opción de nuevo.', 'error');
+        return;
+      }
+
+      if (isNew) {
+        nombre = fullnameInput.value.trim();
+        cedula = docInput.value.trim();
+        if (!nombre) {
+          showAlert('Escribe tu nombre y apellido.', 'error');
+          return;
+        }
+      } else {
+        nombre = select.value;
+        const optSeleccionada = select.options[select.selectedIndex];
+        cedula = optSeleccionada.dataset.cedula || "";
+      }
+
+      try {
+        const res = await fetch('/api/asistencia', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: token,
+            tipo_marca: tipo,
+            nombre_completo: nombre,
+            cedula: cedula,
+            es_nuevo: isNew
+          })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.detail || 'Error al registrar');
+        }
+
+        showAlert(`${data.empleado}: ${data.mensaje}`, 'success');
+        
+        fullnameInput.value = '';
+        docInput.value = '';
+        select.value = '';
+        handleSelectChange();
+
+        if (isNew) {
+          cargarEmpleados();
+        }
+
+        setTimeout(() => {
+          alertBox.classList.add('hidden');
+        }, 5000);
+
+      } catch (err) {
+        showAlert(err.message, 'error');
+      }
+    }
+
+    function showAlert(msg, type) {
+      alertBox.textContent = msg;
+      alertBox.classList.remove('hidden', 'bg-red-100', 'text-red-700', 'bg-emerald-100', 'text-emerald-700');
+      if (type === 'error') {
+        alertBox.classList.add('bg-red-100', 'text-red-700');
+      } else {
+        alertBox.classList.add('bg-emerald-100', 'text-emerald-700');
+      }
+    }
+  </script>
+</body>
+</html>
