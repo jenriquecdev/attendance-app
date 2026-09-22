@@ -4,13 +4,14 @@ from datetime import datetime
 from io import StringIO
 from typing import Optional
 
-from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 app = FastAPI(title="Control de Asistencia QR")
 
-# Configuración de rutas y archivos
+# Configuración de directorios y archivos
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
@@ -18,15 +19,12 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 EMPLEADOS_FILE = os.path.join(BASE_DIR, "empleados.csv")
 ASISTENCIAS_FILE = os.path.join(BASE_DIR, "asistencias.csv")
 
-# Nombre de la plantilla de asistencia
 TEMPLATE_NAME = "checkin.html"
-
-# Token de seguridad configurado para el cartel QR
 VALID_TOKEN = "c4a8b7e2-89f1-4d33-bc12-9901ef234567"
 
 
 def inicializar_archivos():
-    """Asegura que existan los archivos CSV con sus encabezados base."""
+    """Crea los archivos CSV si no existen."""
     if not os.path.exists(EMPLEADOS_FILE):
         with open(EMPLEADOS_FILE, mode="w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
@@ -51,12 +49,16 @@ def obtener_empleados():
             reader = csv.DictReader(f)
             for row in reader:
                 if row.get("nombre"):
-                    empleados.append(row)
+                    empleados.append({
+                        "id": row.get("id", ""),
+                        "nombre": row.get("nombre", "").strip(),
+                        "cedula": row.get("cedula", "").strip(),
+                    })
     return empleados
 
 
 def registrar_nuevo_empleado(nombre: str, cedula: str):
-    """Guarda un empleado nuevo en empleados.csv para futuras ocasiones."""
+    """Agrega un empleado nuevo a empleados.csv."""
     empleados = obtener_empleados()
     nuevo_id = str(len(empleados) + 1)
     with open(EMPLEADOS_FILE, mode="a", encoding="utf-8", newline="") as f:
@@ -64,8 +66,17 @@ def registrar_nuevo_empleado(nombre: str, cedula: str):
         writer.writerow([nuevo_id, nombre.strip(), cedula.strip()])
 
 
+# Modelo del payload recibido en /api/asistencia
+class AsistenciaPayload(BaseModel):
+    token: str
+    tipo_marca: str  # 'entrada' o 'salida'
+    nombre_completo: str
+    cedula: Optional[str] = ""
+    es_nuevo: Optional[bool] = False
+
+
 # ==========================================
-# RUTAS DE LA APLICACIÓN
+# RUTAS DE INTERFAZ HTML
 # ==========================================
 
 @app.get("/", response_class=HTMLResponse)
@@ -75,180 +86,129 @@ def root():
 
 @app.get("/marcar", response_class=HTMLResponse)
 def vista_marcar(request: Request, t: Optional[str] = Query(None)):
-    if t != VALID_TOKEN:
-        raise HTTPException(
-            status_code=403,
-            detail="Acceso no autorizado. Debe escanear el código QR oficial de la obra."
-        )
-
-    empleados = obtener_empleados()
     return templates.TemplateResponse(
         request=request,
         name=TEMPLATE_NAME,
         context={
-            "empleados": empleados,
-            "token": t,
-            "mensaje": None,
-            "tipo_mensaje": None,
+            "token": t or "",
+            "VALID_TOKEN": VALID_TOKEN,
         }
     )
 
 
-@app.post("/marcar", response_class=HTMLResponse)
-def procesar_marcado(
-    request: Request,
-    token: str = Form(...),
-    tipo_accion: str = Form(...),  # 'entrada' o 'salida'
-    empleado_select: str = Form(...),
-    nombre_nuevo: Optional[str] = Form(None),
-    cedula_nueva: Optional[str] = Form(None),
-):
-    if token != VALID_TOKEN:
-        raise HTTPException(status_code=403, detail="Token no válido")
+# ==========================================
+# ENDPOINTS API REST (CONSUMIDOS POR CHECKIN.HTML)
+# ==========================================
 
-    # Determinar identidad del trabajador
-    if empleado_select == "nuevo":
-        if not nombre_nuevo or not nombre_nuevo.strip():
-            empleados = obtener_empleados()
-            return templates.TemplateResponse(
-                request=request,
-                name=TEMPLATE_NAME,
-                context={
-                    "empleados": empleados,
-                    "token": token,
-                    "mensaje": "Debes ingresar tu nombre si seleccionas personal nuevo.",
-                    "tipo_mensaje": "error",
-                }
-            )
-        nombre = nombre_nuevo.strip().title()
-        cedula = (cedula_nueva or "").strip()
-        registrar_nuevo_empleado(nombre, cedula)
-    else:
-        partes = empleado_select.split("|")
-        nombre = partes[0]
-        cedula = partes[1] if len(partes) > 1 else ""
+@app.get("/api/scan/{token}")
+def api_scan(token: str):
+    if token != VALID_TOKEN:
+        raise HTTPException(status_code=403, detail="Cartel QR no válido o vencido")
+    return obtener_empleados()
+
+
+@app.post("/api/asistencia")
+def api_asistencia(data: AsistenciaPayload):
+    if data.token != VALID_TOKEN:
+        raise HTTPException(status_code=403, detail="Cartel QR no válido o vencido")
+
+    nombre = data.nombre_completo.strip().title()
+    cedula = (data.cedula or "").strip()
+    tipo = data.tipo_marca.lower().strip()
+
+    if not nombre:
+        raise HTTPException(status_code=400, detail="El nombre del empleado es obligatorio")
+
+    if data.es_nuevo:
+        # Registrar si no existe en la lista
+        empleados_actuales = [e["nombre"].lower() for e in obtener_empleados()]
+        if nombre.lower() not in empleados_actuales:
+            registrar_nuevo_empleado(nombre, cedula)
 
     ahora = datetime.now()
     fecha_hoy = ahora.strftime("%Y-%m-%d")
     hora_actual = ahora.strftime("%H:%M:%S")
 
-    # Leer registros existentes
     registros = []
-    encontrado = False
-    mensaje_exito = ""
-
     if os.path.exists(ASISTENCIAS_FILE):
         with open(ASISTENCIAS_FILE, mode="r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            registros = list(reader)
+            registros = list(csv.reader(f))
 
     if not registros:
         registros.append(["Nombre", "Cedula", "Fecha", "Hora Entrada", "Hora Salida", "Horas Trabajadas"])
 
-    # Lógica de Entrada / Salida
-    if tipo_accion == "entrada":
-        # Verificar si ya marcó entrada hoy
+    encontrado = False
+    mensaje = ""
+
+    if tipo == "entrada":
         for fila in registros[1:]:
-            if len(fila) >= 3 and fila[0] == nombre and fila[2] == fecha_hoy:
+            if len(fila) >= 3 and fila[0].lower() == nombre.lower() and fila[2] == fecha_hoy:
                 encontrado = True
                 break
 
         if encontrado:
-            empleados = obtener_empleados()
-            return templates.TemplateResponse(
-                request=request,
-                name=TEMPLATE_NAME,
-                context={
-                    "empleados": empleados,
-                    "token": token,
-                    "mensaje": f"Hola {nombre}, ya tienes una entrada registrada el día de hoy.",
-                    "tipo_mensaje": "advertencia",
-                }
+            raise HTTPException(
+                status_code=400,
+                detail=f"Hola {nombre}, ya registraste tu entrada el día de hoy."
             )
 
         registros.append([nombre, cedula, fecha_hoy, hora_actual, "", ""])
-        mensaje_exito = f"¡Entrada registrada con éxito a las {hora_actual}!"
+        mensaje = f"¡Entrada registrada a las {hora_actual}!"
 
-    elif tipo_accion == "salida":
-        # Buscar el registro de hoy para asentar salida y calcular horas
+    elif tipo == "salida":
         for fila in reversed(registros[1:]):
-            if len(fila) >= 3 and fila[0] == nombre and fila[2] == fecha_hoy:
-                if fila[4]:  # Ya tenía salida
-                    empleados = obtener_empleados()
-                    return templates.TemplateResponse(
-                        request=request,
-                        name=TEMPLATE_NAME,
-                        context={
-                            "empleados": empleados,
-                            "token": token,
-                            "mensaje": f"{nombre}, ya habías registrado tu salida anteriormente.",
-                            "tipo_mensaje": "advertencia",
-                        }
+            if len(fila) >= 3 and fila[0].lower() == nombre.lower() and fila[2] == fecha_hoy:
+                if fila[4]:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{nombre}, ya habías registrado tu salida el día de hoy."
                     )
 
                 fila[4] = hora_actual
                 try:
                     t_ent = datetime.strptime(fila[3], "%H:%M:%S")
                     t_sal = datetime.strptime(hora_actual, "%H:%M:%S")
-                    dif_segundos = (t_sal - t_ent).total_seconds()
-                    horas = round(max(0, dif_segundos / 3600), 2)
+                    dif_seg = (t_sal - t_ent).total_seconds()
+                    horas = round(max(0, dif_seg / 3600), 2)
                     fila[5] = str(horas)
                 except Exception:
                     fila[5] = "0.0"
 
                 encontrado = True
-                mensaje_exito = f"¡Salida registrada a las {hora_actual}! Total: {fila[5]} horas trabajadas."
+                mensaje = f"¡Salida registrada a las {hora_actual}! Total: {fila[5]} horas."
                 break
 
         if not encontrado:
-            empleados = obtener_empleados()
-            return templates.TemplateResponse(
-                request=request,
-                name=TEMPLATE_NAME,
-                context={
-                    "empleados": empleados,
-                    "token": token,
-                    "mensaje": f"No se encontró un registro de entrada previo para {nombre} el día de hoy.",
-                    "tipo_mensaje": "error",
-                }
+            raise HTTPException(
+                status_code=400,
+                detail=f"No se encontró registro de entrada para {nombre} hoy."
             )
+    else:
+        raise HTTPException(status_code=400, detail="Tipo de marcación no reconocido")
 
-    # Guardar en asistencias.csv
     with open(ASISTENCIAS_FILE, mode="w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerows(registros)
 
-    empleados = obtener_empleados()
-    return templates.TemplateResponse(
-        request=request,
-        name=TEMPLATE_NAME,
-        context={
-            "empleados": empleados,
-            "token": token,
-            "mensaje": mensaje_exito,
-            "tipo_mensaje": "exito",
-        }
-    )
+    return {
+        "status": "ok",
+        "mensaje": mensaje,
+        "hora": hora_actual,
+        "nombre": nombre,
+    }
 
 
 # ==========================================
-# DESCARGA DE REPORTE COMPATIBLE CON EXCEL
+# DESCARGA DE REPORTE EXCEL (CSV CON BOM)
 # ==========================================
 
 @app.get("/descargar-reporte")
 def descargar_reporte():
-    """
-    Genera un archivo CSV con delimitador ';' y marca UTF-8 BOM (\ufeff)
-    para que Excel en español lo abra en columnas y con acentos correctos al hacer doble clic.
-    """
     if not os.path.exists(ASISTENCIAS_FILE):
-        raise HTTPException(
-            status_code=404,
-            detail="No se encontraron registros de asistencias para exportar."
-        )
+        raise HTTPException(status_code=404, detail="No hay asistencias registradas.")
 
     output = StringIO()
-    output.write("\ufeff")  # BOM UTF-8 para Excel en español
+    output.write("\ufeff")  # BOM UTF-8 para apertura directa en Excel en español
     writer = csv.writer(output, delimiter=";", quoting=csv.QUOTE_MINIMAL)
 
     writer.writerow([
@@ -260,27 +220,17 @@ def descargar_reporte():
         "Horas Trabajadas"
     ])
 
-    try:
-        with open(ASISTENCIAS_FILE, mode="r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            primera_fila = next(reader, None)
-
-            if primera_fila and "nombre" not in primera_fila[0].lower():
-                writer.writerow(primera_fila)
-
-            for fila in reader:
-                if fila and any(campo.strip() for campo in fila):
-                    writer.writerow(fila)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al leer asistencias: {str(e)}")
-
-    contenido = output.getvalue()
-    output.close()
+    with open(ASISTENCIAS_FILE, mode="r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        primera_fila = next(reader, None)
+        if primera_fila and "nombre" not in primera_fila[0].lower():
+            writer.writerow(primera_fila)
+        for fila in reader:
+            if fila and any(c.strip() for c in fila):
+                writer.writerow(fila)
 
     return Response(
-        content=contenido,
+        content=output.getvalue(),
         media_type="text/csv; charset=utf-8",
-        headers={
-            "Content-Disposition": "attachment; filename=reporte_asistencias.csv"
-        }
+        headers={"Content-Disposition": "attachment; filename=reporte_asistencias.csv"}
     )
